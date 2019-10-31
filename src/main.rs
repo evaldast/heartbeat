@@ -1,7 +1,8 @@
 use std::io;
 use std::time::Duration;
 
-use std::sync::mpsc;
+use std::collections::HashMap;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use termion::event::Key;
 use termion::input::MouseTerminal;
@@ -34,11 +35,11 @@ impl Events {
             thread::spawn(move || {
                 let stdin = io::stdin();
                 for evt in stdin.keys() {
-                        if let Ok(key) = evt {
-                            if tx.send(Event::Input(key)).is_err() {
-                                return;
-                            }
+                    if let Ok(key) = evt {
+                        if tx.send(Event::Input(key)).is_err() {
+                            return;
                         }
+                    }
                 }
             })
         };
@@ -64,10 +65,15 @@ impl Events {
     }
 }
 
+type Test = Arc<Mutex<bool>>;
+
 struct App {
     line: Vec<(f64, f64)>,
     dot_x: f64,
     dot_y: f64,
+    initial_heartbeat_x: f64,
+    is_beating: bool,
+    test: Test,
 }
 
 impl App {
@@ -82,15 +88,76 @@ impl App {
             line: dots,
             dot_x: 0.0,
             dot_y: 500.0,
+            initial_heartbeat_x: 0.0,
+            is_beating: false,
+            test: Arc::new(Mutex::new(false)),
         }
     }
 
     fn update(&mut self) {
+        fn heartbeat(state: &mut App) {
+            if state.dot_x > state.initial_heartbeat_x
+                && state.dot_x <= state.initial_heartbeat_x + 20.0
+            {
+                state.dot_y += 15.0;
+
+                for x in 0..15 {
+                    state.line[((state.dot_x as usize) + x) % 1000] = (state.dot_x, state.dot_y + x as f64);
+                }
+            }
+
+            if state.dot_x > state.initial_heartbeat_x + 20.0
+                && state.dot_x <= state.initial_heartbeat_x + 50.0
+            {
+                state.dot_y -= 15.0;
+
+                for x in 0..15 {
+                    state.line[((state.dot_x as usize) + x) % 1000] = (state.dot_x, state.dot_y - x as f64);
+                }
+            }
+
+            if state.dot_x > state.initial_heartbeat_x + 50.0
+                && state.dot_x <= state.initial_heartbeat_x + 60.0
+            {
+                state.dot_y += 15.0;
+
+                for x in 0..15 {
+                    state.line[((state.dot_x as usize) + x) % 1000] = (state.dot_x, state.dot_y + x as f64);
+                }
+            }
+
+            if state.dot_x > state.initial_heartbeat_x + 60.0 {
+                state.is_beating = false;
+            }
+        }
+
         if self.dot_x >= 1000.0 {
-            self.dot_x = 0.0
+            self.dot_x = 0.0;
+            self.dot_y = 500.0;
         }
 
         self.line[self.dot_x as usize] = (self.dot_x, self.dot_y);
+
+        match self.test.lock() {
+            Ok(guard) => {
+                if (*guard) {
+                    self.initial_heartbeat_x = self.dot_x;
+                    self.is_beating = true;
+                }
+            }
+            Err(_) => {}
+        }
+
+        if self.is_beating {
+            match self.test.lock() {
+                Ok(mut guard) => {
+                    *guard = false;
+                }
+                Err(_) => {}
+            }
+
+            heartbeat(self);
+        }
 
         let decay_index = match self.dot_x - 600.0 >= 0.0 {
             true => (self.dot_x - 600.0) as usize,
@@ -98,30 +165,6 @@ impl App {
         };
 
         self.line[decay_index] = (0.0, 0.0);
-
-        if self.dot_x > 550.0 && self.dot_x <= 570.0 {
-            self.dot_y += 15.0;
-
-            for x in 0..15 {
-                self.line[(self.dot_x as usize) + x] = (self.dot_x, self.dot_y + x as f64);
-            }
-        }
-
-        if self.dot_x > 570.0 && self.dot_x <= 600.0 {
-            for x in 0..15 {
-                self.line[(self.dot_x as usize) + x] = (self.dot_x, self.dot_y - x as f64);
-            }
-
-            self.dot_y -= 15.0;
-        }
-
-        if self.dot_x > 600.0 && self.dot_x <= 610.0 {
-            for x in 0..15 {
-                self.line[(self.dot_x as usize) + x] = (self.dot_x, self.dot_y + x as f64);
-            }
-
-            self.dot_y += 15.0;
-        }
 
         self.dot_x += 1.0;
     }
@@ -140,6 +183,8 @@ fn main() -> Result<(), failure::Error> {
     let events = Events::init(Duration::from_millis(10));
     let mut app = App::new();
 
+    start_ping_thread(app.test.clone());
+
     loop {
         terminal.draw(|mut f| {
             let chunks = Layout::default()
@@ -152,7 +197,7 @@ fn main() -> Result<(), failure::Error> {
                 .paint(|ctx| {
                     ctx.draw(&Points {
                         coords: &app.line,
-                        color: Color::Green,
+                        color: Color::LightGreen,
                     });
 
                     ctx.draw(&Points {
@@ -177,4 +222,26 @@ fn main() -> Result<(), failure::Error> {
             }
         }
     }
+}
+
+fn start_ping_thread(test: Test) {
+    fn ping() -> Result<(), failure::Error> {
+        let resp = reqwest::get("http://bonus-engine-api.bonus:5000/api/test/test")?.text()?;
+
+        Ok(())
+    }
+
+    thread::spawn(move || loop {
+        match ping() {
+            Ok(_) => match test.lock() {
+                Ok(mut guard) => {
+                    *guard = true;
+                }
+                Err(_) => {}
+            },
+            Err(error) => {}
+        }
+
+        thread::sleep(std::time::Duration::from_secs(3));
+    });
 }
